@@ -377,10 +377,11 @@ def train_ddpm():
     org_targets = [x[1] for x in org_dataset]
     selected_indices = []
     class_ind_dict = {}
-    for label in selected_classes:
+    for label in range(n_classes):
         label_indices = [idx for idx, target in enumerate(org_targets) if target == label]
         x_indices = label_indices[0: per_class_datasize]
-        selected_indices+=x_indices
+        if label in selected_classes:
+            selected_indices+=x_indices
         class_ind_dict[label] = x_indices
 
     train_dataset = Subset(org_dataset, selected_indices)
