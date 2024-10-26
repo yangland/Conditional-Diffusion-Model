@@ -13,8 +13,12 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 import numpy as np
 import os
 import wandb
-
-device = "cpu"
+from datetime import datetime
+from torch.utils.data import DataLoader, Subset
+from collections import Counter
+import shutil
+import random
+# device = 5
 
 #define ResNet style convolutional block for UNET
 class ResidualConvBlock(nn.Module):
@@ -96,9 +100,9 @@ class EmbedFC(nn.Module):
 
 #implement Context UNET 
 class ContextUnet(nn.Module):
-    def __init__(self, in_channels, n_feat = 256, n_classes=10):
+    def __init__(self, in_channels, n_feat = 256, n_classes=10, device="cuda:0"):
         super(ContextUnet, self).__init__()
-
+        self.device = device
         self.in_channels = in_channels
         self.n_feat = n_feat
         self.n_classes = n_classes
@@ -154,7 +158,7 @@ class ContextUnet(nn.Module):
         context_mask = context_mask[:, None]
         context_mask = context_mask.repeat(1,self.n_classes)
         context_mask = (-1*(1-context_mask)) # need to flip 0 <-> 1
-        c = c.to(device)* context_mask
+        c = c.to(self.device)* context_mask
         
         # embed context, time step
         cemb1 = self.contextembed1(c).view(-1, self.n_feat * 2, 1, 1)
@@ -328,25 +332,37 @@ class DDPM(nn.Module):
         return x_i, x_i_store
 
 
-def train_mnist():
+def timestamp(filename=True):
+    currentDateAndTime = datetime.now()
+    currentTime = currentDateAndTime.strftime("%Y%m%d_%H%M%S")
+    if filename:
+        return currentTime
+    else:
+        return currentDateAndTime.strftime("H%:M%:S")
 
+
+def train_ddpm():
     #define hyperparameters
-    n_epoch = 1
+    n_epoch = 100
     batch_size = 256
     n_T = 400 # 500
-    device = "cuda:0"
+    device = "cuda:7"
     n_classes = 10
     n_feat = 128 
     lrate = 1e-4
+    selected_classes = [0,2,4,6,8] # list(range(10)) # [0,2,4,6,8]
+    per_class_datasize = 2000
     save_model = True
-    save_dir = './louisdata/diffusion_outputs10/'
+    save_dir = f'./louisdata/diffusion_{timestamp()}/'
     ws_test = [0.0, 0.5, 2.0] # strength of generative guidance
     
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
+    
+    shutil.copy(__file__, save_dir)   
 
     #instantiate model
-    ddpm = DDPM(nn_model=ContextUnet(in_channels=3, n_feat=n_feat, n_classes=n_classes), betas=(1e-4, 0.02), n_T=n_T, device=device, drop_prob=0.1)
+    ddpm = DDPM(nn_model=ContextUnet(in_channels=3, n_feat=n_feat, n_classes=n_classes, device=device), betas=(1e-4, 0.02), n_T=n_T, device=device, drop_prob=0.1)
     ddpm.to(device)
 
     # optionally load a model
@@ -355,8 +371,25 @@ def train_mnist():
     tf = transforms.Compose([transforms.ToTensor()]) 
 
     #load dataset
-    dataset = CIFAR10("./datapics", train=True, download=True, transform=tf)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=5)
+    org_dataset = CIFAR10("./datapics", train=True, download=True, transform=tf)
+
+
+    org_targets = [x[1] for x in org_dataset]
+    selected_indices = []
+    class_ind_dict = {}
+    for label in selected_classes:
+        label_indices = [idx for idx, target in enumerate(org_targets) if target == label]
+        x_indices = label_indices[0: per_class_datasize]
+        selected_indices+=x_indices
+        class_ind_dict[label] = x_indices
+
+    train_dataset = Subset(org_dataset, selected_indices)
+
+    print(len(train_dataset))
+    print(Counter([x[1] for x in train_dataset]))
+
+
+    dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=5)
     optim = torch.optim.Adam(ddpm.parameters(), lr=lrate)
 
     for ep in range(n_epoch):
@@ -393,25 +426,31 @@ def train_mnist():
 
                 # append some real images at bottom, order by class also
                 x_real = torch.Tensor(x_gen.shape).to(device)
+
+                # for k in range(n_classes):
+                #     for j in range(int(n_sample/n_classes)):
+                #         try: 
+                #             idx = torch.squeeze((c == k).nonzero())[j]
+                #         except:
+                #             idx = 0
+                #         x_real[k+(j*n_classes)] = x[idx]
+                
                 for k in range(n_classes):
                     for j in range(int(n_sample/n_classes)):
-                        try: 
-                            idx = torch.squeeze((c == k).nonzero())[j]
-                        except:
-                            idx = 0
-                        x_real[k+(j*n_classes)] = x[idx]
+                        idx = random.choice(class_ind_dict[k])
+                        x_real[k+(j*n_classes)] = org_dataset[idx][0]
 
                 x_all = torch.cat([x_gen, x_real])
-                grid = make_grid(x_all*-1 + 1, nrow=10)
+                grid = make_grid(x_all, nrow=10)
                 save_image(grid, save_dir + f"image_ep{ep}_w{w}.png")
                 print('saved image at ' + save_dir + f"image_ep{ep}_w{w}.png")
         # optionally save model
-        if save_model and ep%1 == 0:
+        if save_model and ep == 100:
             torch.save(ddpm.state_dict(), save_dir + f"model_{ep}.pth")
             print('saved model at ' + save_dir + f"model_{ep}.pth")
 
 if __name__ == "__main__":
-    train_mnist()
+    train_ddpm()
 
 
 
